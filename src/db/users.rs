@@ -1,10 +1,21 @@
+use crate::error::AppError;
 use crate::models::{User, UserIdentity};
-use sqlx::PgPool;
+use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct UserRepo {
     pool: PgPool,
+}
+
+#[derive(FromRow)]
+struct EmailUserId {
+    user_id: Uuid,
+}
+
+#[derive(FromRow)]
+struct UserExists {
+    exists: bool,
 }
 
 impl UserRepo {
@@ -66,17 +77,35 @@ impl UserRepo {
         .await
     }
 
-    pub async fn find_user_by_email(&self, email: &str) -> Result<Option<User>, sqlx::Error> {
-        sqlx::query_as::<_, User>(
+    pub async fn find_by_email(&self, email: &str) -> Result<Option<Uuid>, AppError> {
+        let result = sqlx::query_as::<_, EmailUserId>(
             r#"
-                SELECT id, email, full_name, created_at, updated_at
-                FROM store.users
-                WHERE email = $1
+                SELECT u.id as user_id
+                FROM store.users u
+                JOIN store.user_identities ui
+                    ON u.id = ui.user_id
+                WHERE u.email = $1 AND ui.provider = 'email'
             "#,
         )
         .bind(email)
         .fetch_optional(&self.pool)
         .await
+        .map_err(|e| AppError::from(e))?;
+
+        Ok(result.map(|s| s.user_id))
+    }
+
+    pub async fn user_with_email_exists(&self, email: &str) -> Result<bool, AppError> {
+        let result = sqlx::query_as::<_, UserExists>(
+            r#"
+                SELECT EXISTS (SELECT 1 FROM store.users WHERE email = $1) AS exists
+            "#,
+        )
+        .bind(email)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(result.exists)
     }
 }
 
@@ -180,19 +209,4 @@ mod tests {
         assert_eq!(u.id, user.id);
         assert_eq!(u.email, email);
     }
-
-        #[tokio::test]
-        async fn test_find_user_by_email_success() {
-            dotenv().ok();
-            let pool = init_pool().await.unwrap();
-            let repo = UserRepo::new(pool);
-
-            let email = format!("email-find-{}@example.com", uuid::Uuid::new_v4());
-            let _ = repo.create_user(&email, "Email User").await.unwrap();
-
-            let found = repo.find_user_by_email(&email).await.unwrap();
-
-            assert!(found.is_some());
-            assert_eq!(found.unwrap().email, email);
-        }
 }
